@@ -1,0 +1,8 @@
+networkx>=3.0
+matplotlib>=3.7
+
+# Only needed if you want to run mcp_server.py (Claude Code integration).
+# Not required for the core library or the notebook demo.
+mcp>=1.28
+fastapi>=0.110
+uvicorn>=0.29
