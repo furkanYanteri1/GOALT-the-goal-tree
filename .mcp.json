@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "goalt": {
-      "command": "python3",
+      "command": "/usr/local/opt/python@3.11/bin/python3.11",
       "args": ["${CLAUDE_PLUGIN_ROOT}/mcp_server.py"]
     }
   }
