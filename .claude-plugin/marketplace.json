@@ -4,6 +4,7 @@
     "name": "Furkan Yanteri",
     "url": "https://github.com/furkanYanteri1"
   },
+  "description": "GoalT: a multi-parent, value-propagating goal tree for planning and tracking work in Claude Code, with a live visual dashboard.",
   "plugins": [
     {
       "name": "goalt",
