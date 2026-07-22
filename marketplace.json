@@ -1,0 +1,14 @@
+{
+  "name": "goalt-marketplace",
+  "owner": {
+    "name": "Furkan Yanteri",
+    "url": "https://github.com/furkanYanteri1"
+  },
+  "plugins": [
+    {
+      "name": "goalt",
+      "description": "A multi-parent, value-propagating goal tree for planning and tracking work, with a live visual dashboard.",
+      "source": "./"
+    }
+  ]
+}

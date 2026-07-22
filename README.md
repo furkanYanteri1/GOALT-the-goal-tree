@@ -55,7 +55,24 @@ See `demo.ipynb` for the full walkthrough, including the LLM-backed redistributi
 
 ## Use it inside Claude Code
 
-`mcp_server.py` exposes GoalT as an MCP server, so Claude Code can build and query a goal tree directly in conversation — no separate app, no copy-pasting.
+GoalT ships as a Claude Code plugin: an MCP server (build and query a tree in conversation) plus a live dashboard that auto-starts with the server and highlights, in real time, which goal Claude is currently working on.
+
+### Install as a plugin (recommended)
+
+```
+/plugin marketplace add furkanYanteri1/GOALT-the-goal-tree
+/plugin install goalt@goalt-marketplace
+```
+
+This wires up both the MCP tools and the activity hook automatically. You'll need the plugin's Python dependencies installed once -- Claude Code doesn't manage a venv for plugin MCP servers, so clone the repo and install dependencies before (or right after) installing the plugin:
+
+```bash
+git clone https://github.com/furkanYanteri1/GOALT-the-goal-tree.git
+cd GOALT-the-goal-tree
+pip install -r requirements.txt
+```
+
+### Manual install (no activity hook, still works)
 
 ```bash
 git clone https://github.com/furkanYanteri1/GOALT-the-goal-tree.git
@@ -64,25 +81,35 @@ pip install -r requirements.txt
 claude mcp add --transport stdio goalt -- python "$(pwd)/mcp_server.py"
 ```
 
-Then, in a Claude Code session, just talk to it:
+This gets you the tools but not the automatic "Claude is currently..." activity pulse -- that part relies on the plugin's hook, which is only registered via the plugin install path above.
+
+### Using it
+
+In a Claude Code session:
 
 > "Create a goal tree for shipping v2 of our product, with onboarding and performance as sub-goals, and a shared bug fix that depends on both. Show me the priorities and open the dashboard."
 
-Claude calls `create_tree`, `add_goal`, and `list_priorities` on your behalf, then `open_dashboard` hands you a local URL (`http://127.0.0.1:PORT`) to open in your browser: a live, draggable, zoomable graph that re-renders automatically every time a goal is added or changed in the conversation — no need to reopen it.
+Claude calls `create_tree`, `add_goal`, and `list_priorities`, then `open_dashboard` gives you a URL (`http://127.0.0.1:8765`) to open in your browser. From there:
 
-**Available tools:** `create_tree`, `add_goal`, `list_priorities`, `open_dashboard`, `reset_tree`.
+- **Watch mode**: leave the dashboard open while Claude works. If you installed via the plugin path, the header shows a live "Claude is currently..." indicator on every tool call -- this part is guaranteed, it's wired through a Claude Code hook, not dependent on Claude choosing to report anything.
+- **Per-goal highlighting**: when Claude calls `set_active_goal`, the relevant node(s) get a glowing green border in the dashboard. This is best-effort, not guaranteed -- it only happens when Claude chooses to call that tool, which the server instructions ask it to do consistently but can't enforce.
+- **Click any node** to see its full description in the side panel.
+- **Drag nodes** to rearrange them -- positions stick, they won't snap back on the next update. Click "Reset layout" to let the graph re-lay itself out.
 
-**Current limitation:** state lives in memory for the life of the server process — it doesn't persist across restarts yet. Saving/loading a tree to disk is a natural next step (see Known open questions).
+**Available tools:** `create_tree`, `add_goal`, `list_priorities`, `set_active_goal`, `clear_active_goal`, `open_dashboard`, `reset_tree`.
+
+**Current limitation:** state lives in memory for the life of the server process -- it doesn't persist across restarts yet. Saving/loading a tree to disk is a natural next step (see Known open questions).
 
 ## What's actually in this repo
 
-- `goal_tree.py` — the core engine: graph construction, cycle detection, deterministic value propagation, and the pluggable LLM redistribution hook.
-- `visualize.py` — a thin matplotlib/networkx wrapper used by `demo.ipynb` to draw a static graph image.
-- `demo.ipynb` — an interactive, runnable walkthrough (works in Colab, no local setup).
-- `mcp_server.py` — an MCP server exposing GoalT as tools Claude Code can call directly (see above).
-- `dashboard.py` — the live, interactive web dashboard `open_dashboard` starts (FastAPI + vis-network, single file, no build step).
+- `goal_tree.py` -- the core engine: graph construction, cycle detection, deterministic value propagation, and the pluggable LLM redistribution hook.
+- `visualize.py` -- a thin matplotlib/networkx wrapper used by `demo.ipynb` to draw a static graph image.
+- `demo.ipynb` -- an interactive, runnable walkthrough (works in Colab, no local setup).
+- `mcp_server.py` -- the MCP server: tools for building/querying the tree, plus best-effort active-goal tracking. Starts the dashboard automatically on load.
+- `dashboard.py` -- the live, interactive web dashboard (FastAPI + vis-network, single file, no build step), including the hook endpoint Claude Code's PreToolUse hook calls.
+- `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.mcp.json`, `hooks/hooks.json` -- plugin packaging so the whole thing installs with two commands (see above).
 
-No CLI, no web UI, no packaging on PyPI yet — those are natural next steps if there's interest.
+No CLI, no PyPI packaging yet -- natural next steps if there's interest.
 
 ## Known open questions
 

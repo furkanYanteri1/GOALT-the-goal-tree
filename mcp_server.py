@@ -1,7 +1,13 @@
 """
 GoalT MCP server -- exposes the goal_tree engine as tools Claude Code can
 call directly in conversation: create a tree, add goals, list rankings,
-and open a live, interactive dashboard (drag/zoom/hover) in the browser.
+and mark which goal(s) are being actively worked on right now.
+
+The live dashboard (dashboard.py) starts automatically as soon as this
+server starts -- not lazily on first tool call -- because Claude Code's
+PreToolUse hook is configured to POST to it on every tool call. If the
+dashboard weren't already running, every single tool call would hit a
+connection error.
 
 Run standalone for local testing:
     python mcp_server.py
@@ -28,19 +34,37 @@ mcp = FastMCP(
         "Tools for building and querying a GoalT goal tree: a multi-parent, "
         "value-propagating goal graph. Use these when the user wants to break "
         "down a project or objective into sub-goals, understand which sub-goal "
-        "matters most given real dependencies between them, or see the "
-        "resulting priority graph visually. Typical flow: create_tree once "
-        "for the top-level objective, then add_goal repeatedly (a goal can "
-        "list more than one parent if it genuinely serves multiple sub-goals), "
-        "then list_priorities or open_dashboard to see the result. The "
-        "dashboard is a live, interactive page that updates automatically as "
-        "goals are added -- open it once and leave it open."
+        "matters most given real dependencies between them, or track work "
+        "against a live visual plan.\n\n"
+        "Typical flow: create_tree once for the top-level objective (a "
+        "description is optional but makes the dashboard more useful), then "
+        "add_goal repeatedly -- a goal can list more than one parent if it "
+        "genuinely serves multiple sub-goals. Call list_priorities or "
+        "open_dashboard to see the result.\n\n"
+        "IMPORTANT -- keeping the dashboard honest: whenever you are about to "
+        "do substantive work that clearly corresponds to one or more goals in "
+        "the tree, call set_active_goal with those goal ids and a short reason "
+        "first. This highlights them live in the dashboard so the user can see "
+        "what you're working on and why. Call clear_active_goal when that unit "
+        "of work is done. This is a courtesy to the user watching the "
+        "dashboard, not a hard requirement -- but do it consistently, don't "
+        "skip it for convenience."
     ),
 )
 
 # Single in-memory tree for the life of this server process, shared with the
-# dashboard's HTTP handlers so both see the same live state.
-_state: dict = {"graph": None, "_dashboard_url": None}
+# dashboard's HTTP handlers (including the hook endpoints) so everything
+# sees the same live state.
+_state: dict = {
+    "graph": None,
+    "_dashboard_url": None,
+    "active_goals": {},   # {goal_id: reason} -- best-effort, set by set_active_goal
+    "last_activity": None,  # {tool_name, description, timestamp} -- from PreToolUse hook
+}
+
+# Start the dashboard the moment this module loads, so the hook endpoint is
+# always reachable for the whole lifetime of the Claude Code session.
+DASHBOARD_URL = start_dashboard_in_background(_state)
 
 
 def _require_graph() -> GoalGraph:
@@ -57,20 +81,22 @@ def _format_ranking(graph: GoalGraph) -> str:
 
 
 @mcp.tool()
-def create_tree(root_label: str) -> str:
+def create_tree(root_label: str, description: str = "") -> str:
     """Start a new goal tree with a single root goal. Replaces any existing tree in this session.
 
     Args:
         root_label: A short description of the top-level objective, e.g. "Ship v2 of the product".
+        description: Optional longer explanation, shown when the user clicks this goal in the dashboard.
     """
     graph = GoalGraph()
-    graph.add_root("root", root_label)
+    graph.add_root("root", root_label, description=description)
     _state["graph"] = graph
-    return f"Created tree with root: '{root_label}' (id: root)"
+    _state["active_goals"] = {}
+    return f"Created tree with root: '{root_label}' (id: root). Dashboard: {DASHBOARD_URL}"
 
 
 @mcp.tool()
-def add_goal(id: str, label: str, parents: list[str]) -> str:
+def add_goal(id: str, label: str, parents: list[str], description: str = "") -> str:
     """Add a goal to the current tree under one or more existing parent goals.
 
     A goal can have more than one parent if it genuinely serves multiple
@@ -81,10 +107,11 @@ def add_goal(id: str, label: str, parents: list[str]) -> str:
         id: A short unique identifier for this goal, e.g. "fix_export_bug".
         label: A human-readable description of the goal.
         parents: List of existing goal ids this goal belongs under. Must include "root" or another already-added goal id.
+        description: Optional longer explanation, shown when the user clicks this goal in the dashboard.
     """
     graph = _require_graph()
     try:
-        graph.add_goal(id, label, parents=parents)
+        graph.add_goal(id, label, parents=parents, description=description)
     except CycleError as e:
         return f"Rejected: {e}"
     except (ValueError, WeightError) as e:
@@ -100,20 +127,49 @@ def list_priorities() -> str:
 
 
 @mcp.tool()
-def open_dashboard() -> str:
-    """Start (if not already running) and return the URL of a live, interactive dashboard for the current tree.
+def set_active_goal(ids: list[str], reason: str) -> str:
+    """Mark one or more goals as being actively worked on right now -- highlights them live in the dashboard.
 
-    The dashboard is a draggable, zoomable graph that auto-refreshes as
-    goals are added -- open it once in a browser and it stays in sync.
+    Call this right before starting substantive work that clearly
+    corresponds to a goal in the tree. Replaces whatever was previously
+    marked active. Call clear_active_goal when this unit of work is done.
+
+    Args:
+        ids: Goal ids currently being worked on.
+        reason: A short, user-facing explanation of what you're doing and why it relates to these goals.
     """
-    url = start_dashboard_in_background(_state)
-    return f"Dashboard running at {url} -- open it in a browser. It updates automatically as the tree changes, no need to reopen it after adding more goals."
+    graph = _require_graph()
+    unknown = [i for i in ids if i not in graph.g.nodes]
+    if unknown:
+        return f"Error: unknown goal id(s): {unknown}"
+    _state["active_goals"] = {i: reason for i in ids}
+    return f"Marked active: {ids} -- {reason}"
+
+
+@mcp.tool()
+def clear_active_goal() -> str:
+    """Clear whichever goals were marked active, e.g. once the current unit of work is finished."""
+    _state["active_goals"] = {}
+    return "Cleared active goals."
+
+
+@mcp.tool()
+def open_dashboard() -> str:
+    """Return the URL of the live, interactive dashboard for the current tree.
+
+    The dashboard starts automatically with this server -- this just gives
+    you the URL to hand to the user. It's a draggable, zoomable graph that
+    auto-refreshes as goals are added or marked active, and shows a live
+    "Claude is currently..." indicator driven by Claude Code's own hooks.
+    """
+    return f"Dashboard running at {DASHBOARD_URL} -- open it in a browser. It updates automatically, no need to reopen it."
 
 
 @mcp.tool()
 def reset_tree() -> str:
     """Discard the current tree so a new one can be started with create_tree."""
     _state["graph"] = None
+    _state["active_goals"] = {}
     return "Tree cleared."
 
 

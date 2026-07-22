@@ -39,6 +39,7 @@ class Goal:
     id: str
     label: str
     value: float = 0.0
+    description: str = ""
     meta: dict = field(default_factory=dict)
 
 
@@ -74,25 +75,25 @@ class GoalGraph:
 
     # ---------- graph construction ----------
 
-    def add_root(self, id: str, label: str) -> Goal:
+    def add_root(self, id: str, label: str, description: str = "") -> Goal:
         if self.root_id is not None:
             raise ValueError(
                 f"Root already set to '{self.root_id}'. A GoalGraph has exactly one root. "
                 "If you need a second independent goal, create a separate GoalGraph."
             )
-        goal = Goal(id=id, label=label, value=1.0)
+        goal = Goal(id=id, label=label, value=1.0, description=description)
         self.g.add_node(id, goal=goal)
         self.root_id = id
         return goal
 
-    def add_goal(self, id: str, label: str, parents: list[str]) -> Goal:
+    def add_goal(self, id: str, label: str, parents: list[str], description: str = "") -> Goal:
         """Add a goal with one or more parents. Rejects cycles explicitly."""
         if self.root_id is None:
             raise ValueError("Call add_root() before adding child goals.")
         if not parents:
             raise ValueError("A non-root goal must have at least one parent.")
 
-        goal = Goal(id=id, label=label, value=0.0)
+        goal = Goal(id=id, label=label, value=0.0, description=description)
         self.g.add_node(id, goal=goal)
 
         for p in parents:
@@ -233,7 +234,12 @@ class GoalGraph:
         return {
             "root": self.root_id,
             "nodes": [
-                {"id": n, "label": self.g.nodes[n]["goal"].label, "value": self.g.nodes[n]["goal"].value}
+                {
+                    "id": n,
+                    "label": self.g.nodes[n]["goal"].label,
+                    "value": self.g.nodes[n]["goal"].value,
+                    "description": self.g.nodes[n]["goal"].description,
+                }
                 for n in self.g.nodes
             ],
             "edges": [
