@@ -1,6 +1,6 @@
 {
   "name": "goalt",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A multi-parent, value-propagating goal tree for planning and tracking work, with a live visual dashboard that highlights what Claude is currently doing.",
   "author": {
     "name": "Furkan Yanteri",
