@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -366,6 +367,57 @@ PAGE = """<!DOCTYPE html>
 """
 
 
+_VSCODE_APP_NAMES = ("Visual Studio Code", "Visual Studio Code - Insiders", "VSCodium")
+
+
+def _launch_diff_editor(head_copy_path: str, abs_path: str, runner=subprocess.run, is_macos: bool | None = None) -> tuple[bool, str | None]:
+    """Try to open a diff (head_copy_path vs abs_path) in VS Code.
+
+    Order of attempts, each one only tried if the previous one wasn't
+    available (not just "failed to run" -- see below):
+    1. On macOS, `open -a <VS Code variant> --args --diff ...` -- launches
+       the .app bundle directly via LaunchServices. Doesn't need the `code`
+       CLI on PATH at all, so this needs zero manual setup for the common
+       case and is tried first there.
+    2. The `code` CLI on PATH (works cross-platform, and is the only option
+       on Linux/Windows here).
+    Only if neither worked do we return an error telling the person how to
+    set up the `code` CLI manually, as a last resort.
+
+    `runner` and `is_macos` are injectable for testing without actually
+    spawning processes or depending on the real OS.
+    """
+    if is_macos is None:
+        is_macos = sys.platform == "darwin"
+
+    if is_macos:
+        for app_name in _VSCODE_APP_NAMES:
+            try:
+                result = runner(
+                    ["open", "-a", app_name, "--args", "--diff", head_copy_path, abs_path],
+                    timeout=5, capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    return True, None
+            except FileNotFoundError:
+                break  # `open` itself missing would be very unusual -- no point retrying other app names
+            except Exception:
+                continue
+
+    try:
+        runner(["code", "--diff", head_copy_path, abs_path], timeout=5, capture_output=True)
+        return True, None
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    return False, (
+        "Couldn't open VS Code automatically. Make sure it's installed, or run "
+        "\"Shell Command: Install 'code' command in PATH\" from VS Code's Command Palette and try again."
+    )
+
+
 def _describe_tool_call(tool_name: str, tool_input: dict) -> str:
     """Best-effort human-readable summary of a hook payload for the activity pulse."""
     if tool_name in ("Edit", "Write") and isinstance(tool_input, dict) and tool_input.get("file_path"):
@@ -455,13 +507,13 @@ def create_app(state: dict) -> FastAPI:
 
     @app.post("/api/open-diff")
     async def api_open_diff(request: Request):
-        """Open a file's uncommitted changes as a diff in VS Code (`code --diff`).
+        """Open a file's uncommitted changes as a diff in VS Code.
 
-        Best-effort: requires the `code` CLI to be on PATH (VS Code's "Shell
-        Command: Install 'code' command in PATH" from the command palette).
-        Returns a clear error instead of a stack trace if it isn't available
-        or the file isn't tracked by git, so the frontend can show a helpful
-        message rather than fail silently.
+        No manual setup required on macOS: launches VS Code.app directly via
+        `open -a`, which doesn't need the `code` CLI on PATH at all. Falls
+        back to the `code` CLI (useful on Linux/Windows, or if someone has
+        already set it up) and only surfaces a "please install the code
+        command" message as a last resort, if nothing else worked.
         """
         try:
             body = await request.json()
@@ -492,20 +544,9 @@ def create_app(state: dict) -> FastAPI:
         with open(head_copy_path, "w") as f:
             f.write(head_result.stdout)
 
-        try:
-            subprocess.run(
-                ["code", "--diff", head_copy_path, abs_path],
-                timeout=5, capture_output=True,
-            )
-        except FileNotFoundError:
-            return JSONResponse({
-                "ok": False,
-                "error": "The 'code' command isn't on your PATH. In VS Code, open the Command "
-                         "Palette and run \"Shell Command: Install 'code' command in PATH\", then try again.",
-            }, status_code=500)
-        except subprocess.TimeoutExpired:
-            pass  # code --diff returns immediately in most setups; a timeout here isn't necessarily a failure
-
+        ok, error = _launch_diff_editor(head_copy_path, abs_path)
+        if not ok:
+            return JSONResponse({"ok": False, "error": error}, status_code=500)
         return JSONResponse({"ok": True})
 
     @app.post("/hooks/pre-tool-use")

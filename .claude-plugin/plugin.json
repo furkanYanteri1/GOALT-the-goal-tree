@@ -1,6 +1,6 @@
 {
   "name": "goalt",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "A multi-parent, value-propagating goal tree for planning and tracking work, with a live visual dashboard that highlights what Claude is currently doing, tracks uncommitted changes, and links goals to real files and backend artifacts, with one-click links to open files (and diff uncommitted changes) directly in VS Code.",
   "author": {
     "name": "Furkan Yanteri",
