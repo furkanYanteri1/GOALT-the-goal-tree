@@ -19,20 +19,27 @@ This gets you the tools but not the automatic "Claude is currently..." activity 
 
 ### Using it
 
-In a Claude Code session:
+**Onboarding an existing codebase:** run the `/goalt:start` slash command in the project you want to plan. Claude explores the repo (README, package manifest, folder structure, database migrations if present), identifies real functional areas, and builds a tree with genuine descriptions -- linking the files and backend artifacts (database tables, edge functions, etc.) it's confident actually implement each goal, rather than fabricating structure.
+
+**Starting from scratch,** in a Claude Code session:
 
 > "Create a goal tree for shipping v2 of our product, with onboarding and performance as sub-goals, and a shared bug fix that depends on both. Show me the priorities and open the dashboard."
 
 Claude calls `create_tree`, `add_goal`, and `list_priorities`, then `open_dashboard` gives you a URL (`http://127.0.0.1:8765`) to open in your browser. From there:
 
-- **Watch mode**: leave the dashboard open while Claude works. If you installed via the plugin path, the header shows a live "Claude is currently..." indicator on every tool call -- this part is guaranteed, it's wired through a Claude Code hook, not dependent on Claude choosing to report anything.
-- **Per-goal highlighting**: when Claude calls `set_active_goal`, the relevant node(s) get a glowing green border in the dashboard. This is best-effort, not guaranteed -- it only happens when Claude chooses to call that tool, which the server instructions ask it to do consistently but can't enforce.
-- **Click any node** to see its full description in the side panel.
+- **Watch mode**: leave the dashboard open while Claude works. The header shows a live "Claude is currently..." indicator on every tool call -- guaranteed, wired through a Claude Code hook.
+- **File-edit highlighting (guaranteed)**: once a goal has `related_files` linked, editing one of those files automatically highlights that goal with a glowing green border -- no extra tool call needed, the hook matches the edited path against every goal's related files.
+- **Self-reported highlighting (best-effort)**: for goals that don't map cleanly to specific files, Claude can call `set_active_goal` with a reason. Best-effort only -- it happens if Claude chooses to call it, not guaranteed.
+- **Uncommitted-changes tracking**: if `project_root` was set when the tree was created, a background thread polls `git status` every few seconds and marks goals with an amber border if any of their related files have uncommitted changes -- independent of whether anything is being actively edited right now.
+- **Click any node** to open a side panel with two tabs: **Description** (the goal's description plus its related files/backend artifacts) and **Changes** (files currently being edited and/or with uncommitted changes, for this specific goal). Clicking a node that's currently active or has uncommitted work opens straight to the Changes tab.
 - **Drag nodes** to rearrange them -- positions stick, they won't snap back on the next update. Click "Reset layout" to let the graph re-lay itself out.
 
-**Available tools:** `create_tree`, `add_goal`, `list_priorities`, `set_active_goal`, `clear_active_goal`, `open_dashboard`, `reset_tree`.
+**Available tools:** `create_tree`, `add_goal`, `link_artifacts`, `list_priorities`, `set_active_goal`, `clear_active_goal`, `open_dashboard`, `reset_tree`.
 
-**Current limitation:** state lives in memory for the life of the server process -- it doesn't persist across restarts yet. Saving/loading a tree to disk is a natural next step (see Known open questions).
+**Current limitations:**
+- State lives in memory for the life of the server process -- it doesn't persist across restarts yet. Saving/loading a tree to disk is a natural next step (see Known open questions).
+- File-to-goal matching (`goals_for_file`) is a heuristic suffix match, not exact-path resolution -- it can mismatch on ambiguous relative paths in unusual project layouts.
+- Uncommitted-changes tracking assumes a single git repository at `project_root` and re-polls on a fixed interval (a few seconds), so there's a small lag between a change happening and it showing up.
 
 ## What's actually in this repo
 
@@ -42,6 +49,7 @@ Claude calls `create_tree`, `add_goal`, and `list_priorities`, then `open_dashbo
 - `mcp_server.py` -- the MCP server: tools for building/querying the tree, plus best-effort active-goal tracking. Starts the dashboard automatically on load.
 - `dashboard.py` -- the live, interactive web dashboard (FastAPI + vis-network, single file, no build step), including the hook endpoint Claude Code's PreToolUse hook calls.
 - `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.mcp.json`, `hooks/hooks.json` -- plugin packaging so the whole thing installs with two commands (see above).
+- `commands/start.md` -- the `/goalt:start` slash command that onboards GoalT onto an existing codebase.
 
 No CLI, no PyPI packaging yet -- natural next steps if there's interest.
 

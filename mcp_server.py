@@ -36,19 +36,31 @@ mcp = FastMCP(
         "down a project or objective into sub-goals, understand which sub-goal "
         "matters most given real dependencies between them, or track work "
         "against a live visual plan.\n\n"
-        "Typical flow: create_tree once for the top-level objective (a "
-        "description is optional but makes the dashboard more useful), then "
-        "add_goal repeatedly -- a goal can list more than one parent if it "
-        "genuinely serves multiple sub-goals. Call list_priorities or "
-        "open_dashboard to see the result.\n\n"
-        "IMPORTANT -- keeping the dashboard honest: whenever you are about to "
-        "do substantive work that clearly corresponds to one or more goals in "
-        "the tree, call set_active_goal with those goal ids and a short reason "
-        "first. This highlights them live in the dashboard so the user can see "
-        "what you're working on and why. Call clear_active_goal when that unit "
-        "of work is done. This is a courtesy to the user watching the "
-        "dashboard, not a hard requirement -- but do it consistently, don't "
-        "skip it for convenience."
+        "Typical flow: create_tree once for the top-level objective, passing "
+        "project_root (the absolute path to the project's root directory) so "
+        "uncommitted-changes tracking works. Then add_goal repeatedly -- a "
+        "goal can list more than one parent if it genuinely serves multiple "
+        "sub-goals, and can optionally list related_files (paths relative to "
+        "project_root) and related_backend (e.g. database tables, edge "
+        "functions -- free text, whatever is meaningful for this project). "
+        "Use link_artifacts to attach files/backend to a goal after the fact "
+        "if you discover them later. Call list_priorities or open_dashboard "
+        "to see the result.\n\n"
+        "ONBOARDING AN EXISTING PROJECT: if the user asks you to build a goal "
+        "tree for a codebase that doesn't have one yet, explore it first "
+        "(README, package.json/pyproject.toml, folder structure, database "
+        "migrations if present) to understand its real architecture, then "
+        "build the tree top-down with create_tree/add_goal, writing a genuine "
+        "description for each goal and linking the files/backend artifacts "
+        "that actually implement it. Don't guess at structure without looking "
+        "-- read enough of the codebase to get it right.\n\n"
+        "KEEPING THE DASHBOARD HONEST: once a goal has related_files linked, "
+        "editing one of those files automatically highlights that goal in the "
+        "dashboard -- no extra tool call needed, it's driven by a hook. For "
+        "goals that don't map cleanly to specific files, you can still call "
+        "set_active_goal with a short reason before starting work on them, "
+        "and clear_active_goal when done. Do this consistently, not just when "
+        "convenient."
     ),
 )
 
@@ -58,8 +70,11 @@ mcp = FastMCP(
 _state: dict = {
     "graph": None,
     "_dashboard_url": None,
-    "active_goals": {},   # {goal_id: reason} -- best-effort, set by set_active_goal
-    "last_activity": None,  # {tool_name, description, timestamp} -- from PreToolUse hook
+    "active_goals": {},          # {goal_id: reason} -- best-effort, set by set_active_goal
+    "last_activity": None,       # {tool_name, description, timestamp} -- from PreToolUse hook
+    "project_root": None,        # absolute path, set by create_tree, used for git status polling
+    "file_edit_goals_raw": {},   # {goal_id: {file, timestamp}} -- guaranteed, hook-driven
+    "uncommitted": {},           # {goal_id: [files...]} -- from background git status polling
 }
 
 # Start the dashboard the moment this module loads, so the hook endpoint is
@@ -81,22 +96,34 @@ def _format_ranking(graph: GoalGraph) -> str:
 
 
 @mcp.tool()
-def create_tree(root_label: str, description: str = "") -> str:
+def create_tree(root_label: str, description: str = "", project_root: str = "") -> str:
     """Start a new goal tree with a single root goal. Replaces any existing tree in this session.
 
     Args:
         root_label: A short description of the top-level objective, e.g. "Ship v2 of the product".
         description: Optional longer explanation, shown when the user clicks this goal in the dashboard.
+        project_root: Optional absolute path to the project's root directory. Enables uncommitted-changes
+            tracking (via `git status`) once goals have related_files linked. Skip for non-code planning.
     """
     graph = GoalGraph()
     graph.add_root("root", root_label, description=description)
     _state["graph"] = graph
     _state["active_goals"] = {}
+    _state["file_edit_goals_raw"] = {}
+    _state["uncommitted"] = {}
+    _state["project_root"] = project_root or None
     return f"Created tree with root: '{root_label}' (id: root). Dashboard: {DASHBOARD_URL}"
 
 
 @mcp.tool()
-def add_goal(id: str, label: str, parents: list[str], description: str = "") -> str:
+def add_goal(
+    id: str,
+    label: str,
+    parents: list[str],
+    description: str = "",
+    related_files: list[str] | None = None,
+    related_backend: list[str] | None = None,
+) -> str:
     """Add a goal to the current tree under one or more existing parent goals.
 
     A goal can have more than one parent if it genuinely serves multiple
@@ -108,15 +135,42 @@ def add_goal(id: str, label: str, parents: list[str], description: str = "") -> 
         label: A human-readable description of the goal.
         parents: List of existing goal ids this goal belongs under. Must include "root" or another already-added goal id.
         description: Optional longer explanation, shown when the user clicks this goal in the dashboard.
+        related_files: Optional file paths (relative to project_root) that implement this goal. Editing one of
+            these files later automatically highlights this goal in the dashboard.
+        related_backend: Optional free-text backend artifacts relevant to this goal, e.g. "supabase.orders table"
+            or "edge function: create-payment-intent".
     """
     graph = _require_graph()
     try:
-        graph.add_goal(id, label, parents=parents, description=description)
+        graph.add_goal(
+            id, label, parents=parents, description=description,
+            related_files=related_files, related_backend=related_backend,
+        )
     except CycleError as e:
         return f"Rejected: {e}"
     except (ValueError, WeightError) as e:
         return f"Error: {e}"
     return f"Added '{label}' (id: {id}) under {parents}.\n\n{_format_ranking(graph)}"
+
+
+@mcp.tool()
+def link_artifacts(id: str, related_files: list[str] | None = None, related_backend: list[str] | None = None) -> str:
+    """Attach additional related files / backend artifacts to an existing goal.
+
+    Appends to whatever's already linked (deduplicated) -- use this when you
+    discover more relevant files/artifacts for a goal after it was created.
+
+    Args:
+        id: Existing goal id.
+        related_files: File paths (relative to project_root) to add.
+        related_backend: Free-text backend artifacts to add.
+    """
+    graph = _require_graph()
+    try:
+        graph.link_artifacts(id, files=related_files, backend=related_backend)
+    except ValueError as e:
+        return f"Error: {e}"
+    return f"Linked artifacts to '{id}'."
 
 
 @mcp.tool()
@@ -170,6 +224,9 @@ def reset_tree() -> str:
     """Discard the current tree so a new one can be started with create_tree."""
     _state["graph"] = None
     _state["active_goals"] = {}
+    _state["file_edit_goals_raw"] = {}
+    _state["uncommitted"] = {}
+    _state["project_root"] = None
     return "Tree cleared."
 
 

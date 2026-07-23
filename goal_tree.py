@@ -40,6 +40,8 @@ class Goal:
     label: str
     value: float = 0.0
     description: str = ""
+    related_files: list[str] = field(default_factory=list)
+    related_backend: list[str] = field(default_factory=list)
     meta: dict = field(default_factory=dict)
 
 
@@ -75,25 +77,46 @@ class GoalGraph:
 
     # ---------- graph construction ----------
 
-    def add_root(self, id: str, label: str, description: str = "") -> Goal:
+    def add_root(
+        self,
+        id: str,
+        label: str,
+        description: str = "",
+        related_files: list[str] | None = None,
+        related_backend: list[str] | None = None,
+    ) -> Goal:
         if self.root_id is not None:
             raise ValueError(
                 f"Root already set to '{self.root_id}'. A GoalGraph has exactly one root. "
                 "If you need a second independent goal, create a separate GoalGraph."
             )
-        goal = Goal(id=id, label=label, value=1.0, description=description)
+        goal = Goal(
+            id=id, label=label, value=1.0, description=description,
+            related_files=list(related_files or []), related_backend=list(related_backend or []),
+        )
         self.g.add_node(id, goal=goal)
         self.root_id = id
         return goal
 
-    def add_goal(self, id: str, label: str, parents: list[str], description: str = "") -> Goal:
+    def add_goal(
+        self,
+        id: str,
+        label: str,
+        parents: list[str],
+        description: str = "",
+        related_files: list[str] | None = None,
+        related_backend: list[str] | None = None,
+    ) -> Goal:
         """Add a goal with one or more parents. Rejects cycles explicitly."""
         if self.root_id is None:
             raise ValueError("Call add_root() before adding child goals.")
         if not parents:
             raise ValueError("A non-root goal must have at least one parent.")
 
-        goal = Goal(id=id, label=label, value=0.0, description=description)
+        goal = Goal(
+            id=id, label=label, value=0.0, description=description,
+            related_files=list(related_files or []), related_backend=list(related_backend or []),
+        )
         self.g.add_node(id, goal=goal)
 
         for p in parents:
@@ -118,6 +141,52 @@ class GoalGraph:
 
         self.recompute(changed_node=id, context={})
         return goal
+
+    def link_artifacts(
+        self,
+        id: str,
+        files: list[str] | None = None,
+        backend: list[str] | None = None,
+        replace: bool = False,
+    ) -> Goal:
+        """Attach (or replace) related files / backend artifacts on an existing goal.
+
+        By default this appends to whatever's already linked (deduplicated),
+        since analysis often discovers a goal's related files incrementally
+        across multiple tool calls. Pass replace=True to overwrite instead.
+        """
+        if id not in self.g.nodes:
+            raise ValueError(f"Unknown goal id: '{id}'")
+        goal = self.g.nodes[id]["goal"]
+        if replace:
+            goal.related_files = list(files or [])
+            goal.related_backend = list(backend or [])
+        else:
+            if files:
+                goal.related_files = list(dict.fromkeys(goal.related_files + list(files)))
+            if backend:
+                goal.related_backend = list(dict.fromkeys(goal.related_backend + list(backend)))
+        return goal
+
+    def goals_for_file(self, file_path: str) -> list[str]:
+        """Return ids of goals whose related_files match this path.
+
+        Matching is intentionally loose (suffix match after normalizing
+        separators) because callers may pass absolute paths, paths relative
+        to different working directories, or paths with different casing on
+        case-insensitive filesystems. This is a heuristic, not exact-path
+        matching -- documented as such in README.
+        """
+        normalized_target = file_path.replace("\\", "/").rstrip("/")
+        matches = []
+        for n in self.g.nodes:
+            goal = self.g.nodes[n]["goal"]
+            for f in goal.related_files:
+                normalized_f = f.replace("\\", "/").rstrip("/")
+                if normalized_target == normalized_f or normalized_target.endswith("/" + normalized_f) or normalized_f.endswith("/" + normalized_target):
+                    matches.append(n)
+                    break
+        return matches
 
     # ---------- value propagation ----------
 
@@ -239,6 +308,8 @@ class GoalGraph:
                     "label": self.g.nodes[n]["goal"].label,
                     "value": self.g.nodes[n]["goal"].value,
                     "description": self.g.nodes[n]["goal"].description,
+                    "related_files": self.g.nodes[n]["goal"].related_files,
+                    "related_backend": self.g.nodes[n]["goal"].related_backend,
                 }
                 for n in self.g.nodes
             ],
