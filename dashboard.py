@@ -37,7 +37,9 @@ static string in plugin.json -- it has to know where to find us in advance.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -95,6 +97,13 @@ PAGE = """<!DOCTYPE html>
     .changeRow .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 10px; margin-right: 6px; }
     .badge.editing { background: rgba(74, 222, 128, 0.15); color: #4ade80; }
     .badge.uncommitted { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+    .fileLink { color: #cfd3da; text-decoration: none; border-bottom: 1px dotted #4a4d55; }
+    .fileLink:hover { color: #e8e8e8; border-bottom-color: #9aa0a8; }
+    .diffBtn { background: #1e2128; border: 1px solid #333640; color: #cfd3da; font-size: 10px; padding: 2px 8px; border-radius: 4px; cursor: pointer; margin-left: 6px; }
+    .diffBtn:hover { background: #262932; }
+    .diffBtn:disabled { opacity: 0.6; cursor: default; }
+    .diffMsg { font-size: 11px; margin-top: 4px; }
+    .diffMsg.diffError { color: #f87171; }
     #empty { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #7d8590; text-align: center; }
   </style>
 </head>
@@ -149,6 +158,7 @@ PAGE = """<!DOCTYPE html>
     const panel = document.getElementById('panel');
     let currentTab = 'description';
     let currentNode = null;
+    let currentProjectRoot = null;
 
     function renderTabBody() {
       if (!currentNode) return;
@@ -163,7 +173,7 @@ PAGE = """<!DOCTYPE html>
           html += `<div class="desc empty">No description set for this goal.</div>`;
         }
         if (currentNode.related_files && currentNode.related_files.length) {
-          html += `<div class="artifactGroup"><h3>Related files</h3><ul>${currentNode.related_files.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul></div>`;
+          html += `<div class="artifactGroup"><h3>Related files</h3><ul>${currentNode.related_files.map(f => `<li>${vscodeLink(f)}</li>`).join('')}</ul></div>`;
         }
         if (currentNode.related_backend && currentNode.related_backend.length) {
           html += `<div class="artifactGroup"><h3>Backend</h3><ul>${currentNode.related_backend.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul></div>`;
@@ -172,14 +182,46 @@ PAGE = """<!DOCTYPE html>
       } else {
         let html = '';
         if (currentNode.editingFiles && currentNode.editingFiles.length) {
-          html += currentNode.editingFiles.map(f => `<div class="changeRow"><span class="badge editing">editing</span>${escapeHtml(f)}</div>`).join('');
+          html += currentNode.editingFiles.map(f => `<div class="changeRow"><span class="badge editing">editing</span>${vscodeLink(f)}</div>`).join('');
         }
         if (currentNode.uncommittedFiles && currentNode.uncommittedFiles.length) {
-          html += currentNode.uncommittedFiles.map(f => `<div class="changeRow"><span class="badge uncommitted">uncommitted</span>${escapeHtml(f)}</div>`).join('');
+          html += currentNode.uncommittedFiles.map(f => `<div class="changeRow"><span class="badge uncommitted">uncommitted</span>${vscodeLink(f)} <button class="diffBtn" data-file="${escapeHtml(f)}">Diff</button><div class="diffMsg" data-for="${escapeHtml(f)}"></div></div>`).join('');
         }
         if (!html) html = '<div class="empty">No active edits or uncommitted changes detected for this goal.</div>';
         body.innerHTML = html;
+
+        body.querySelectorAll('.diffBtn').forEach(btn => {
+          btn.onclick = async () => {
+            const file = btn.dataset.file;
+            const msgEl = body.querySelector(`.diffMsg[data-for="${CSS.escape(file)}"]`);
+            btn.disabled = true;
+            btn.textContent = 'Opening...';
+            try {
+              const res = await fetch('/api/open-diff', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ file }),
+              });
+              const data = await res.json();
+              if (!data.ok) {
+                msgEl.textContent = data.error || 'Could not open diff.';
+                msgEl.classList.add('diffError');
+              }
+            } catch (err) {
+              msgEl.textContent = 'Could not reach the dashboard server.';
+              msgEl.classList.add('diffError');
+            }
+            btn.disabled = false;
+            btn.textContent = 'Diff';
+          };
+        });
       }
+    }
+
+    function vscodeLink(relPath) {
+      const safe = escapeHtml(relPath);
+      if (!currentProjectRoot) return safe;
+      const full = (currentProjectRoot.replace(/[/]$/, '')) + '/' + relPath.replace(/^[/]/, '');
+      return `<a href="vscode://file/${encodeURI(full)}" class="fileLink">${safe}</a>`;
     }
 
     function escapeHtml(s) {
@@ -212,6 +254,7 @@ PAGE = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/graph');
         const data = await res.json();
+        currentProjectRoot = data.project_root || null;
 
         const emptyEl = document.getElementById('empty');
         if (!data.nodes.length) {
@@ -393,7 +436,7 @@ def create_app(state: dict) -> FastAPI:
     def api_graph():
         graph: GoalGraph | None = state.get("graph")
         if graph is None:
-            return JSONResponse({"nodes": [], "edges": [], "active_goals": {}, "file_edit_goals": {}, "uncommitted": {}})
+            return JSONResponse({"nodes": [], "edges": [], "active_goals": {}, "file_edit_goals": {}, "uncommitted": {}, "project_root": None})
         payload = graph.to_dict()
         payload["active_goals"] = state.get("active_goals", {})
 
@@ -403,11 +446,67 @@ def create_app(state: dict) -> FastAPI:
             file_edit_map.setdefault(goal_id, []).append(entry["file"])
         payload["file_edit_goals"] = file_edit_map
         payload["uncommitted"] = state.get("uncommitted", {})
+        payload["project_root"] = state.get("project_root")
         return JSONResponse(payload)
 
     @app.get("/api/activity")
     def api_activity():
         return JSONResponse({"last_activity": state.get("last_activity")})
+
+    @app.post("/api/open-diff")
+    async def api_open_diff(request: Request):
+        """Open a file's uncommitted changes as a diff in VS Code (`code --diff`).
+
+        Best-effort: requires the `code` CLI to be on PATH (VS Code's "Shell
+        Command: Install 'code' command in PATH" from the command palette).
+        Returns a clear error instead of a stack trace if it isn't available
+        or the file isn't tracked by git, so the frontend can show a helpful
+        message rather than fail silently.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        rel_path = body.get("file")
+        project_root = state.get("project_root")
+        if not rel_path or not project_root:
+            return JSONResponse({"ok": False, "error": "Missing file path or project root."}, status_code=400)
+
+        abs_path = os.path.join(project_root, rel_path)
+        if not os.path.isfile(abs_path):
+            return JSONResponse({"ok": False, "error": f"File not found: {abs_path}"}, status_code=404)
+
+        try:
+            head_result = subprocess.run(
+                ["git", "show", f"HEAD:{rel_path}"],
+                cwd=project_root, capture_output=True, text=True, timeout=5,
+            )
+        except FileNotFoundError:
+            return JSONResponse({"ok": False, "error": "git is not available."}, status_code=500)
+
+        if head_result.returncode != 0:
+            return JSONResponse({"ok": False, "error": f"No committed version of {rel_path} found (new file?)."}, status_code=404)
+
+        tmp_dir = tempfile.mkdtemp(prefix="goalt-diff-")
+        head_copy_path = os.path.join(tmp_dir, os.path.basename(rel_path) or "file")
+        with open(head_copy_path, "w") as f:
+            f.write(head_result.stdout)
+
+        try:
+            subprocess.run(
+                ["code", "--diff", head_copy_path, abs_path],
+                timeout=5, capture_output=True,
+            )
+        except FileNotFoundError:
+            return JSONResponse({
+                "ok": False,
+                "error": "The 'code' command isn't on your PATH. In VS Code, open the Command "
+                         "Palette and run \"Shell Command: Install 'code' command in PATH\", then try again.",
+            }, status_code=500)
+        except subprocess.TimeoutExpired:
+            pass  # code --diff returns immediately in most setups; a timeout here isn't necessarily a failure
+
+        return JSONResponse({"ok": True})
 
     @app.post("/hooks/pre-tool-use")
     async def hook_pre_tool_use(request: Request):
