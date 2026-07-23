@@ -1,6 +1,6 @@
 {
   "name": "goalt",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A multi-parent, value-propagating goal tree for planning and tracking work, with a live visual dashboard that highlights what Claude is currently doing, tracks uncommitted changes, and links goals to real files and backend artifacts.",
   "author": {
     "name": "Furkan Yanteri",
@@ -8,5 +8,11 @@
   },
   "homepage": "https://github.com/furkanYanteri1/GOALT-the-goal-tree",
   "license": "Apache-2.0",
-  "keywords": ["planning", "prioritization", "goal-tree", "project-management", "dashboard"]
+  "keywords": [
+    "planning",
+    "prioritization",
+    "goal-tree",
+    "project-management",
+    "dashboard"
+  ]
 }
