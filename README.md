@@ -34,10 +34,10 @@ Claude calls `create_tree`, `add_goal`, and `list_priorities`, then `open_dashbo
 - **Click any node** to open a side panel with two tabs: **Description** (the goal's description plus its related files/backend artifacts) and **Changes** (files currently being edited and/or with uncommitted changes, for this specific goal). Clicking a node that's currently active or has uncommitted work opens straight to the Changes tab.
 - **Drag nodes** to rearrange them -- positions stick, they won't snap back on the next update. Click "Reset layout" to let the graph re-lay itself out.
 
-**Available tools:** `create_tree`, `add_goal`, `link_artifacts`, `list_priorities`, `set_active_goal`, `clear_active_goal`, `open_dashboard`, `reset_tree`.
+**Available tools:** `load_tree`, `create_tree`, `add_goal`, `link_artifacts`, `list_priorities`, `set_active_goal`, `clear_active_goal`, `open_dashboard`, `reset_tree`.
 
 **Current limitations:**
-- State lives in memory for the life of the server process -- it doesn't persist across restarts yet. Saving/loading a tree to disk is a natural next step (see Known open questions).
+- The tree auto-saves to `<project_root>/.goalt/tree.json` on every change and auto-loads on the next session (either a best-effort guess at startup, or reliably via `load_tree` once Claude knows the actual project root -- the system instructions point it there first). Add `.goalt/` to your project's `.gitignore` if you don't want to commit it.
 - File-to-goal matching (`goals_for_file`) is a heuristic suffix match, not exact-path resolution -- it can mismatch on ambiguous relative paths in unusual project layouts.
 - Uncommitted-changes tracking assumes a single git repository at `project_root` and re-polls on a fixed interval (a few seconds), so there's a small lag between a change happening and it showing up.
 
@@ -62,7 +62,7 @@ Being upfront about this instead of overselling it:
 - **Cost at scale.** With a real LLM plugged in, every `add_goal` call can trigger one redistribution call per affected parent. On a large, deep graph that could mean a lot of API calls per edit. Caching / batching isn't implemented yet.
 - **No benchmark yet.** This hasn't been compared against classical prioritization methods (AHP, weighted scoring, plain OKR cascading) on a real backlog. That comparison is a natural next step, not a claim already made.
 - **Cycle detection is currently a defensive backstop, not an active safeguard.** Through the public `add_goal` API alone, a cycle is impossible by construction (a new node has no outgoing edges yet). The check matters for a planned future feature — linking two already-existing goals together — where cycles become genuinely reachable.
-- **MCP server state isn't persisted.** `mcp_server.py` holds one tree in memory for the life of the process; it resets on restart. Save/load to disk is a natural next step.
+- **Startup auto-load is a guess, not a guarantee.** At server startup, GoalT tries loading a saved tree using its own process's working directory as a guess for project_root -- this works when Claude Code happens to launch the MCP server rooted at the project, but isn't guaranteed. The reliable path is the explicit `load_tree` tool, which the system instructions tell Claude to call first with the actual project root before assuming no tree exists.
 - **Relationship to existing work.** The value-propagation mechanism is closely related to PageRank-style algorithms on DAGs. If you know prior art that solves this better, please open an issue — genuinely interested, not trying to reinvent something that already exists.
 
 ## Contributing

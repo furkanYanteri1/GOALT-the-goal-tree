@@ -9,18 +9,25 @@ PreToolUse hook is configured to POST to it on every tool call. If the
 dashboard weren't already running, every single tool call would hit a
 connection error.
 
+PERSISTENCE: the tree is auto-saved to `<project_root>/.goalt/tree.json`
+every time it changes (create_tree, add_goal, link_artifacts), and
+auto-loaded from there in two places: once, best-effort, at server startup
+(guessing project_root from the process's own working directory), and
+reliably via the explicit `load_tree` tool once Claude knows the real
+project_root. active_goals / file-edit tracking / uncommitted status are
+NOT persisted -- those are meant to reflect "right now", not history.
+
 Run standalone for local testing:
     python mcp_server.py
 
 Add to Claude Code:
     claude mcp add --transport stdio goalt -- python /absolute/path/to/mcp_server.py
-
-State is held in memory for the life of the server process (one tree per
-running server). It does not persist across restarts yet -- see the
-"Known open questions" section in README.md.
 """
 
 from __future__ import annotations
+
+import json
+import os
 
 from mcp.server.fastmcp import FastMCP
 
@@ -36,24 +43,31 @@ mcp = FastMCP(
         "down a project or objective into sub-goals, understand which sub-goal "
         "matters most given real dependencies between them, or track work "
         "against a live visual plan.\n\n"
-        "Typical flow: create_tree once for the top-level objective, passing "
-        "project_root (the absolute path to the project's root directory) so "
-        "uncommitted-changes tracking works. Then add_goal repeatedly -- a "
-        "goal can list more than one parent if it genuinely serves multiple "
-        "sub-goals, and can optionally list related_files (paths relative to "
+        "SESSION START: before assuming no tree exists, call load_tree with "
+        "the project's root directory -- a tree from an earlier session may "
+        "already be saved on disk. Only fall back to exploring the codebase "
+        "and calling create_tree if load_tree reports nothing was found.\n\n"
+        "Typical flow otherwise: create_tree once for the top-level "
+        "objective, passing project_root (the absolute path to the "
+        "project's root directory) so uncommitted-changes tracking and "
+        "persistence both work. Then add_goal repeatedly -- a goal can list "
+        "more than one parent if it genuinely serves multiple sub-goals, "
+        "and can optionally list related_files (paths relative to "
         "project_root) and related_backend (e.g. database tables, edge "
         "functions -- free text, whatever is meaningful for this project). "
         "Use link_artifacts to attach files/backend to a goal after the fact "
         "if you discover them later. Call list_priorities or open_dashboard "
-        "to see the result.\n\n"
+        "to see the result. The tree auto-saves on every change -- no "
+        "explicit save step needed.\n\n"
         "ONBOARDING AN EXISTING PROJECT: if the user asks you to build a goal "
-        "tree for a codebase that doesn't have one yet, explore it first "
-        "(README, package.json/pyproject.toml, folder structure, database "
-        "migrations if present) to understand its real architecture, then "
-        "build the tree top-down with create_tree/add_goal, writing a genuine "
-        "description for each goal and linking the files/backend artifacts "
-        "that actually implement it. Don't guess at structure without looking "
-        "-- read enough of the codebase to get it right.\n\n"
+        "tree for a codebase that doesn't have one yet (and load_tree found "
+        "nothing), explore it first (README, package.json/pyproject.toml, "
+        "folder structure, database migrations if present) to understand "
+        "its real architecture, then build the tree top-down with "
+        "create_tree/add_goal, writing a genuine description for each goal "
+        "and linking the files/backend artifacts that actually implement "
+        "it. Don't guess at structure without looking -- read enough of the "
+        "codebase to get it right.\n\n"
         "KEEPING THE DASHBOARD HONEST: once a goal has related_files linked, "
         "editing one of those files automatically highlights that goal in the "
         "dashboard -- no extra tool call needed, it's driven by a hook. For "
@@ -95,19 +109,65 @@ _state: dict = {
     "_dashboard_url": None,
     "active_goals": {},          # {goal_id: reason} -- best-effort, set by set_active_goal
     "last_activity": None,       # {tool_name, description, timestamp} -- from PreToolUse hook
-    "project_root": None,        # absolute path, set by create_tree, used for git status polling
+    "project_root": None,        # absolute path, set by create_tree/load_tree
     "file_edit_goals_raw": {},   # {goal_id: {file, timestamp}} -- guaranteed, hook-driven
     "uncommitted": {},           # {goal_id: [files...]} -- from background git status polling
 }
+
+_SAVE_SUBDIR = ".goalt"
+_SAVE_FILENAME = "tree.json"
+
+
+def _save_path(project_root: str) -> str:
+    return os.path.join(project_root, _SAVE_SUBDIR, _SAVE_FILENAME)
+
+
+def _persist(state: dict) -> None:
+    """Best-effort save. Never raises -- a disk/permission problem shouldn't break a tool call."""
+    graph: GoalGraph | None = state.get("graph")
+    project_root = state.get("project_root")
+    if graph is None or not project_root:
+        return
+    try:
+        path = _save_path(project_root)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(graph.to_dict(), f, indent=2)
+    except Exception:
+        pass
+
+
+def _load_from_disk(project_root: str) -> GoalGraph | None:
+    """Best-effort load. Returns None (never raises) if nothing valid is found."""
+    try:
+        path = _save_path(project_root)
+        if not os.path.isfile(path):
+            return None
+        with open(path) as f:
+            data = json.load(f)
+        return GoalGraph.from_dict(data)
+    except Exception:
+        return None
+
 
 # Start the dashboard the moment this module loads, so the hook endpoint is
 # always reachable for the whole lifetime of the Claude Code session.
 DASHBOARD_URL = start_dashboard_in_background(_state)
 
+# Best-effort auto-load at startup: guess the project root from this
+# process's own working directory. This is a guess, not a guarantee -- the
+# explicit load_tree tool (with a project_root Claude actually knows) is
+# the reliable path and is what the system instructions point Claude to.
+_guessed_root = os.getcwd()
+_startup_graph = _load_from_disk(_guessed_root)
+if _startup_graph is not None:
+    _state["graph"] = _startup_graph
+    _state["project_root"] = _guessed_root
+
 
 def _require_graph() -> GoalGraph:
     if _state["graph"] is None:
-        raise ValueError("No tree exists yet. Call create_tree first.")
+        raise ValueError("No tree exists yet. Call load_tree first to check for a saved one, or create_tree to start fresh.")
     return _state["graph"]
 
 
@@ -119,6 +179,29 @@ def _format_ranking(graph: GoalGraph) -> str:
 
 
 @mcp.tool()
+def load_tree(project_root: str) -> str:
+    """Load a previously saved tree for this project, if one exists on disk.
+
+    Call this at the start of a session before assuming no tree exists --
+    a tree from an earlier session may already be saved. Returns a message
+    saying whether anything was found. Does not error if nothing is found;
+    just says so, so you can fall back to onboarding/create_tree.
+
+    Args:
+        project_root: Absolute path to the project's root directory.
+    """
+    graph = _load_from_disk(project_root)
+    if graph is None:
+        return f"No saved tree found at {project_root}. Use create_tree to start one."
+    _state["graph"] = graph
+    _state["project_root"] = project_root
+    _state["active_goals"] = {}
+    _state["file_edit_goals_raw"] = {}
+    _state["uncommitted"] = {}
+    return f"Loaded saved tree for {project_root}. Dashboard: {DASHBOARD_URL}\n\n{_format_ranking(graph)}"
+
+
+@mcp.tool()
 def create_tree(root_label: str, description: str = "", project_root: str = "") -> str:
     """Start a new goal tree with a single root goal. Replaces any existing tree in this session.
 
@@ -126,7 +209,8 @@ def create_tree(root_label: str, description: str = "", project_root: str = "") 
         root_label: A short description of the top-level objective, e.g. "Ship v2 of the product".
         description: Optional longer explanation, shown when the user clicks this goal in the dashboard.
         project_root: Optional absolute path to the project's root directory. Enables uncommitted-changes
-            tracking (via `git status`) once goals have related_files linked. Skip for non-code planning.
+            tracking (via `git status`) and disk persistence once goals have related_files linked. Skip
+            only for non-code, throwaway planning you don't need saved.
     """
     graph = GoalGraph()
     graph.add_root("root", root_label, description=description)
@@ -135,6 +219,7 @@ def create_tree(root_label: str, description: str = "", project_root: str = "") 
     _state["file_edit_goals_raw"] = {}
     _state["uncommitted"] = {}
     _state["project_root"] = project_root or None
+    _persist(_state)
     return f"Created tree with root: '{root_label}' (id: root). Dashboard: {DASHBOARD_URL}"
 
 
@@ -173,6 +258,7 @@ def add_goal(
         return f"Rejected: {e}"
     except (ValueError, WeightError) as e:
         return f"Error: {e}"
+    _persist(_state)
     return f"Added '{label}' (id: {id}) under {parents}.\n\n{_format_ranking(graph)}"
 
 
@@ -193,6 +279,7 @@ def link_artifacts(id: str, related_files: list[str] | None = None, related_back
         graph.link_artifacts(id, files=related_files, backend=related_backend)
     except ValueError as e:
         return f"Error: {e}"
+    _persist(_state)
     return f"Linked artifacts to '{id}'."
 
 
@@ -244,7 +331,15 @@ def open_dashboard() -> str:
 
 @mcp.tool()
 def reset_tree() -> str:
-    """Discard the current tree so a new one can be started with create_tree."""
+    """Discard the current tree (in memory and on disk) so a new one can be started with create_tree."""
+    project_root = _state.get("project_root")
+    if project_root:
+        try:
+            path = _save_path(project_root)
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception:
+            pass
     _state["graph"] = None
     _state["active_goals"] = {}
     _state["file_edit_goals_raw"] = {}

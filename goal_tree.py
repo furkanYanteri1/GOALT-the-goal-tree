@@ -299,6 +299,30 @@ class GoalGraph:
                 out[n] = sum(self.g.edges[n, c]["weight"] or 0 for c in children)
         return out
 
+    @classmethod
+    def from_dict(cls, data: dict, redistribution_fn: Optional[RedistributionFn] = None) -> "GoalGraph":
+        """Reconstruct a GoalGraph from a dict produced by to_dict().
+
+        Values and edge weights are restored directly from the snapshot
+        rather than recomputed, so this is an exact restore, not a re-run
+        of the redistribution function.
+        """
+        graph = cls(redistribution_fn=redistribution_fn)
+        for n in data["nodes"]:
+            goal = Goal(
+                id=n["id"],
+                label=n["label"],
+                value=n.get("value", 0.0),
+                description=n.get("description", ""),
+                related_files=list(n.get("related_files", [])),
+                related_backend=list(n.get("related_backend", [])),
+            )
+            graph.g.add_node(n["id"], goal=goal)
+        graph.root_id = data["root"]
+        for e in data["edges"]:
+            graph.g.add_edge(e["from"], e["to"], weight=e["weight"])
+        return graph
+
     def to_dict(self) -> dict:
         return {
             "root": self.root_id,
